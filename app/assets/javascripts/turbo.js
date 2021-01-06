@@ -2349,12 +2349,11 @@ class View {
   shouldCacheSnapshot() {
     return this.getSnapshot().isCacheable();
   }
-  async cacheSnapshot() {
+  cacheSnapshot() {
     if (this.shouldCacheSnapshot()) {
       this.delegate.viewWillCacheSnapshot();
       const snapshot = this.getSnapshot();
       const location = this.lastRenderedLocation || Location.currentLocation;
-      await nextMicrotask();
       this.snapshotCache.put(location, snapshot.clone());
     }
   }
