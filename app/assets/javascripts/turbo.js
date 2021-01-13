@@ -2354,7 +2354,7 @@ class View {
       this.delegate.viewWillCacheSnapshot();
       const snapshot = this.getSnapshot();
       const location = this.lastRenderedLocation || Location.currentLocation;
-      this.snapshotCache.put(location, snapshot.clone());
+      setTimeout(() => this.snapshotCache.put(location, snapshot.clone()));
     }
   }
   getCachedSnapshotForLocation(location) {
