@@ -132,82 +132,59 @@ function frameLoadingStyleFromString(style) {
   }
 }
 
-class Location {
-  constructor(url) {
-    const linkWithAnchor = document.createElement("a");
-    linkWithAnchor.href = url;
-    this.absoluteURL = linkWithAnchor.href;
-    const anchorLength = linkWithAnchor.hash.length;
-    if (anchorLength < 2) {
-      this.requestURL = this.absoluteURL;
-    } else {
-      this.requestURL = this.absoluteURL.slice(0, -anchorLength);
-      this.anchor = linkWithAnchor.hash.slice(1);
-    }
-  }
-  static get currentLocation() {
-    return this.wrap(window.location.toString());
-  }
-  static wrap(locatable) {
-    if (typeof locatable == "string") {
-      return new this(locatable);
-    } else if (locatable != null) {
-      return locatable;
-    }
-  }
-  getOrigin() {
-    return this.absoluteURL.split("/", 3).join("/");
-  }
-  getPath() {
-    return (this.requestURL.match(/\/\/[^/]*(\/[^?;]*)/) || [])[1] || "/";
-  }
-  getPathComponents() {
-    return this.getPath().split("/").slice(1);
-  }
-  getLastPathComponent() {
-    return this.getPathComponents().slice(-1)[0];
-  }
-  getExtension() {
-    return (this.getLastPathComponent().match(/\.[^.]*$/) || [])[0] || "";
-  }
-  isHTML() {
-    return !!this.getExtension().match(/^(?:|\.(?:htm|html|xhtml))$/);
-  }
-  isPrefixedBy(location) {
-    const prefixURL = getPrefixURL(location);
-    return this.isEqualTo(location) || stringStartsWith(this.absoluteURL, prefixURL);
-  }
-  isEqualTo(location) {
-    return location && this.absoluteURL === location.absoluteURL;
-  }
-  toCacheKey() {
-    return this.requestURL;
-  }
-  toJSON() {
-    return this.absoluteURL;
-  }
-  toString() {
-    return this.absoluteURL;
-  }
-  valueOf() {
-    return this.absoluteURL;
+function expandURL(locatable) {
+  const anchor = document.createElement("a");
+  anchor.href = locatable.toString();
+  return new URL(anchor.href);
+}
+
+function getAnchor(url) {
+  let anchorMatch;
+  if (url.hash) {
+    return url.hash.slice(1);
+  } else if (anchorMatch = url.href.match(/#(.*)$/)) {
+    return anchorMatch[1];
+  } else {
+    return "";
   }
 }
 
-function getPrefixURL(location) {
-  return addTrailingSlash(location.getOrigin() + location.getPath());
+function getExtension(url) {
+  return (getLastPathComponent(url).match(/\.[^.]*$/) || [])[0] || "";
 }
 
-function addTrailingSlash(url) {
-  return stringEndsWith(url, "/") ? url : url + "/";
+function isHTML(url) {
+  return !!getExtension(url).match(/^(?:|\.(?:htm|html|xhtml))$/);
 }
 
-function stringStartsWith(string, prefix) {
-  return string.slice(0, prefix.length) === prefix;
+function isPrefixedBy(baseURL, url) {
+  const prefix = getPrefix(url);
+  return baseURL.href === expandURL(prefix).href || baseURL.href.startsWith(prefix);
 }
 
-function stringEndsWith(string, suffix) {
-  return string.slice(-suffix.length) === suffix;
+function toCacheKey(url) {
+  const anchorLength = url.hash.length;
+  if (anchorLength < 2) {
+    return url.href;
+  } else {
+    return url.href.slice(0, -anchorLength);
+  }
+}
+
+function getPathComponents(url) {
+  return url.pathname.split("/").slice(1);
+}
+
+function getLastPathComponent(url) {
+  return getPathComponents(url).slice(-1)[0];
+}
+
+function getPrefix(url) {
+  return addTrailingSlash(url.origin + url.pathname);
+}
+
+function addTrailingSlash(value) {
+  return value.endsWith("/") ? value : value + "/";
 }
 
 class FetchResponse {
@@ -230,7 +207,7 @@ class FetchResponse {
     return this.response.redirected;
   }
   get location() {
-    return Location.wrap(this.response.url);
+    return expandURL(this.response.url);
   }
   get isHTML() {
     return this.contentType && this.contentType.match(/^(?:text\/([^\s;,]+\b)?html|application\/xhtml\+xml)\b/);
@@ -272,6 +249,10 @@ function nextAnimationFrame() {
 
 function nextMicrotask() {
   return Promise.resolve();
+}
+
+function parseHTMLDocument(html = "") {
+  return (new DOMParser).parseFromString(html, "text/html");
 }
 
 function unindent(strings, ...values) {
@@ -338,23 +319,14 @@ class FetchRequest {
     this.abortController = new AbortController;
     this.delegate = delegate;
     this.method = method;
-    this.location = location;
     this.body = body;
+    this.url = mergeFormDataEntries(location, this.entries);
   }
-  get url() {
-    const url = this.location.absoluteURL;
-    const query = this.params.toString();
-    if (this.isIdempotent && query.length) {
-      return [ url, query ].join(url.includes("?") ? "&" : "?");
-    } else {
-      return url;
-    }
+  get location() {
+    return this.url;
   }
   get params() {
-    return this.entries.reduce(((params, [name, value]) => {
-      params.append(name, value.toString());
-      return params;
-    }), new URLSearchParams);
+    return this.url.searchParams;
   }
   get entries() {
     return this.body ? Array.from(this.body.entries()) : [];
@@ -371,7 +343,7 @@ class FetchRequest {
     });
     try {
       this.delegate.requestStarted(this);
-      const response = await fetch(this.url, fetchOptions);
+      const response = await fetch(this.url.href, fetchOptions);
       return await this.receive(response);
     } catch (error) {
       this.delegate.requestErrored(this, error);
@@ -425,6 +397,13 @@ class FetchRequest {
   get abortSignal() {
     return this.abortController.signal;
   }
+}
+
+function mergeFormDataEntries(url, entries) {
+  for (const [name, value] of entries) {
+    url.searchParams.append(name, value.toString());
+  }
+  return url;
 }
 
 class AppearanceObserver {
@@ -485,7 +464,7 @@ class FormSubmission {
     return ((_a = this.submitter) === null || _a === void 0 ? void 0 : _a.getAttribute("formaction")) || this.formElement.action;
   }
   get location() {
-    return Location.wrap(this.action);
+    return expandURL(this.action);
   }
   async start() {
     const {initialized: initialized, requesting: requesting} = FormSubmissionState;
@@ -602,6 +581,37 @@ function responseSucceededWithoutRedirect(response) {
   return response.statusCode == 200 && !response.redirected;
 }
 
+class Snapshot {
+  constructor(element) {
+    this.element = element;
+  }
+  get children() {
+    return [ ...this.element.children ];
+  }
+  hasAnchor(anchor) {
+    return this.getElementForAnchor(anchor) != null;
+  }
+  getElementForAnchor(anchor) {
+    try {
+      return this.element.querySelector(`[id='${anchor}'], a[name='${anchor}']`);
+    } catch (_a) {
+      return null;
+    }
+  }
+  get firstAutofocusableElement() {
+    return this.element.querySelector("[autofocus]");
+  }
+  get permanentElements() {
+    return [ ...this.element.querySelectorAll("[id][data-turbo-permanent]") ];
+  }
+  getPermanentElementById(id) {
+    return this.element.querySelector(`#${id}[data-turbo-permanent]`);
+  }
+  getPermanentElementsPresentInSnapshot(snapshot) {
+    return this.permanentElements.filter((({id: id}) => snapshot.getPermanentElementById(id)));
+  }
+}
+
 class FormInterceptor {
   constructor(delegate, element) {
     this.submitBubbled = event => {
@@ -623,6 +633,82 @@ class FormInterceptor {
   }
   stop() {
     this.element.removeEventListener("submit", this.submitBubbled);
+  }
+}
+
+class View {
+  constructor(delegate, element) {
+    this.delegate = delegate;
+    this.element = element;
+  }
+  scrollToAnchor(anchor) {
+    const element = this.snapshot.getElementForAnchor(anchor);
+    if (element) {
+      this.scrollToElement(element);
+    } else {
+      this.scrollToPosition({
+        x: 0,
+        y: 0
+      });
+    }
+  }
+  scrollToElement(element) {
+    element.scrollIntoView();
+  }
+  scrollToPosition({x: x, y: y}) {
+    this.scrollRoot.scrollTo(x, y);
+  }
+  get scrollRoot() {
+    return window;
+  }
+  async render(renderer) {
+    if (this.renderer) {
+      throw new Error("rendering is already in progress");
+    }
+    const {isPreview: isPreview, shouldRender: shouldRender, newSnapshot: snapshot} = renderer;
+    if (shouldRender) {
+      try {
+        this.renderer = renderer;
+        this.prepareToRenderSnapshot(renderer);
+        this.delegate.viewWillRenderSnapshot(snapshot, isPreview);
+        await this.renderSnapshot(renderer);
+        this.delegate.viewRenderedSnapshot(snapshot, isPreview);
+        this.finishRenderingSnapshot(renderer);
+      } finally {
+        delete this.renderer;
+      }
+    } else {
+      this.invalidate();
+    }
+  }
+  invalidate() {
+    this.delegate.viewInvalidated();
+  }
+  prepareToRenderSnapshot(renderer) {
+    this.markAsPreview(renderer.isPreview);
+    renderer.prepareToRender();
+  }
+  markAsPreview(isPreview) {
+    if (isPreview) {
+      this.element.setAttribute("data-turbo-preview", "");
+    } else {
+      this.element.removeAttribute("data-turbo-preview");
+    }
+  }
+  async renderSnapshot(renderer) {
+    await renderer.render();
+  }
+  finishRenderingSnapshot(renderer) {
+    renderer.finishRendering();
+  }
+}
+
+class FrameView extends View {
+  invalidate() {
+    this.element.innerHTML = "";
+  }
+  get snapshot() {
+    return new Snapshot(this.element);
   }
 }
 
@@ -667,10 +753,119 @@ class LinkInterceptor {
   }
 }
 
+class Renderer {
+  constructor(currentSnapshot, newSnapshot, isPreview) {
+    this.currentSnapshot = currentSnapshot;
+    this.newSnapshot = newSnapshot;
+    this.isPreview = isPreview;
+    this.promise = new Promise(((resolve, reject) => this.resolvingFunctions = {
+      resolve: resolve,
+      reject: reject
+    }));
+  }
+  get shouldRender() {
+    return true;
+  }
+  prepareToRender() {
+    return;
+  }
+  finishRendering() {
+    if (this.resolvingFunctions) {
+      this.resolvingFunctions.resolve();
+      delete this.resolvingFunctions;
+    }
+  }
+  createScriptElement(element) {
+    if (element.getAttribute("data-turbo-eval") == "false") {
+      return element;
+    } else {
+      const createdScriptElement = document.createElement("script");
+      createdScriptElement.textContent = element.textContent;
+      createdScriptElement.async = false;
+      copyElementAttributes(createdScriptElement, element);
+      return createdScriptElement;
+    }
+  }
+  get currentElement() {
+    return this.currentSnapshot.element;
+  }
+  get newElement() {
+    return this.newSnapshot.element;
+  }
+}
+
+function copyElementAttributes(destinationElement, sourceElement) {
+  for (const {name: name, value: value} of [ ...sourceElement.attributes ]) {
+    destinationElement.setAttribute(name, value);
+  }
+}
+
+class FrameRenderer extends Renderer {
+  get shouldRender() {
+    return true;
+  }
+  async render() {
+    await nextAnimationFrame();
+    this.loadFrameElement();
+    this.scrollFrameIntoView();
+    await nextAnimationFrame();
+    this.focusFirstAutofocusableElement();
+  }
+  loadFrameElement() {
+    var _a;
+    const destinationRange = document.createRange();
+    destinationRange.selectNodeContents(this.currentElement);
+    destinationRange.deleteContents();
+    const frameElement = this.newElement;
+    const sourceRange = (_a = frameElement.ownerDocument) === null || _a === void 0 ? void 0 : _a.createRange();
+    if (sourceRange) {
+      sourceRange.selectNodeContents(frameElement);
+      this.currentElement.appendChild(sourceRange.extractContents());
+    }
+  }
+  scrollFrameIntoView() {
+    if (this.currentElement.autoscroll || this.newElement.autoscroll) {
+      const element = this.currentElement.firstElementChild;
+      const block = readScrollLogicalPosition(this.currentElement.getAttribute("data-autoscroll-block"), "end");
+      if (element) {
+        element.scrollIntoView({
+          block: block
+        });
+        return true;
+      }
+    }
+    return false;
+  }
+  focusFirstAutofocusableElement() {
+    const element = this.firstAutofocusableElement;
+    if (element) {
+      element.focus();
+      return true;
+    }
+    return false;
+  }
+  get id() {
+    return this.currentElement.id;
+  }
+  get firstAutofocusableElement() {
+    const element = this.currentElement.querySelector("[autofocus]");
+    return element instanceof HTMLElement ? element : null;
+  }
+}
+
+function readScrollLogicalPosition(value, defaultValue) {
+  if (value == "end" || value == "start" || value == "center" || value == "nearest") {
+    return value;
+  } else {
+    return defaultValue;
+  }
+}
+
 class FrameController {
   constructor(element) {
     this.resolveVisitPromise = () => {};
     this.element = element;
+    this.view = new FrameView(this, this.element);
     this.appearanceObserver = new AppearanceObserver(this, this.element);
     this.linkInterceptor = new LinkInterceptor(this, this.element);
     this.formInterceptor = new FormInterceptor(this, this.element);
@@ -713,14 +908,17 @@ class FrameController {
     }
   }
   async loadResponse(response) {
-    const fragment = fragmentFromHTML(await response.responseHTML);
-    if (fragment) {
-      const element = await this.extractForeignFrameElement(fragment);
-      await nextAnimationFrame();
-      this.loadFrameElement(element);
-      this.scrollFrameIntoView(element);
-      await nextAnimationFrame();
-      this.focusFirstAutofocusableElement();
+    try {
+      const html = await response.responseHTML;
+      if (html) {
+        const {body: body} = parseHTMLDocument(html);
+        const snapshot = new Snapshot(await this.extractForeignFrameElement(body));
+        const renderer = new FrameRenderer(this.view.snapshot, snapshot, false);
+        await this.view.render(renderer);
+      }
+    } catch (error) {
+      console.error(error);
+      this.view.invalidate();
     }
   }
   elementAppearedInViewport(element) {
@@ -741,7 +939,7 @@ class FrameController {
     }
     this.formSubmission = new FormSubmission(this, element, submitter);
     if (this.formSubmission.fetchRequest.isIdempotent) {
-      this.navigateFrame(element, this.formSubmission.fetchRequest.url);
+      this.navigateFrame(element, this.formSubmission.fetchRequest.url.href);
     } else {
       this.formSubmission.start();
     }
@@ -782,9 +980,11 @@ class FrameController {
   }
   formSubmissionErrored(formSubmission, error) {}
   formSubmissionFinished(formSubmission) {}
+  viewWillRenderSnapshot(snapshot, isPreview) {}
+  viewRenderedSnapshot(snapshot, isPreview) {}
+  viewInvalidated() {}
   async visit(url) {
-    const location = Location.wrap(url);
-    const request = new FetchRequest(this, FetchMethod.get, location);
+    const request = new FetchRequest(this, FetchMethod.get, expandURL(url));
     return new Promise((resolve => {
       this.resolveVisitPromise = () => {
         this.resolveVisitPromise = () => {};
@@ -815,38 +1015,6 @@ class FrameController {
     console.error(`Response has no matching <turbo-frame id="${id}"> element`);
     return new FrameElement;
   }
-  loadFrameElement(frameElement) {
-    var _a;
-    const destinationRange = document.createRange();
-    destinationRange.selectNodeContents(this.element);
-    destinationRange.deleteContents();
-    const sourceRange = (_a = frameElement.ownerDocument) === null || _a === void 0 ? void 0 : _a.createRange();
-    if (sourceRange) {
-      sourceRange.selectNodeContents(frameElement);
-      this.element.appendChild(sourceRange.extractContents());
-    }
-  }
-  focusFirstAutofocusableElement() {
-    const element = this.firstAutofocusableElement;
-    if (element) {
-      element.focus();
-      return true;
-    }
-    return false;
-  }
-  scrollFrameIntoView(frame) {
-    if (this.element.autoscroll || frame.autoscroll) {
-      const element = this.element.firstElementChild;
-      const block = readScrollLogicalPosition(this.element.getAttribute("data-autoscroll-block"), "end");
-      if (element) {
-        element.scrollIntoView({
-          block: block
-        });
-        return true;
-      }
-    }
-    return false;
-  }
   shouldInterceptNavigation(element) {
     const id = element.getAttribute("data-turbo-frame") || this.element.getAttribute("target");
     if (!this.enabled || id == "_top") {
@@ -859,10 +1027,6 @@ class FrameController {
       }
     }
     return true;
-  }
-  get firstAutofocusableElement() {
-    const element = this.element.querySelector("[autofocus]");
-    return element instanceof HTMLElement ? element : null;
   }
   get id() {
     return this.element.id;
@@ -890,21 +1054,6 @@ function getFrameElementById(id) {
     if (element instanceof FrameElement) {
       return element;
     }
-  }
-}
-
-function readScrollLogicalPosition(value, defaultValue) {
-  if (value == "end" || value == "start" || value == "center" || value == "nearest") {
-    return value;
-  } else {
-    return defaultValue;
-  }
-}
-
-function fragmentFromHTML(html) {
-  if (html) {
-    const foreignDocument = document.implementation.createHTMLDocument();
-    return foreignDocument.createRange().createContextualFragment(html);
   }
 }
 
@@ -1138,9 +1287,10 @@ class ProgressBar {
 
 ProgressBar.animationDuration = 300;
 
-class HeadDetails {
-  constructor(children) {
-    this.detailsByOuterHTML = children.reduce(((result, element) => {
+class HeadSnapshot extends Snapshot {
+  constructor() {
+    super(...arguments);
+    this.detailsByOuterHTML = this.children.reduce(((result, element) => {
       const {outerHTML: outerHTML} = element;
       const details = outerHTML in result ? result[outerHTML] : {
         type: elementType(element),
@@ -1154,23 +1304,19 @@ class HeadDetails {
       });
     }), {});
   }
-  static fromHeadElement(headElement) {
-    const children = headElement ? [ ...headElement.children ] : [];
-    return new this(children);
-  }
-  getTrackedElementSignature() {
+  get trackedElementSignature() {
     return Object.keys(this.detailsByOuterHTML).filter((outerHTML => this.detailsByOuterHTML[outerHTML].tracked)).join("");
   }
-  getScriptElementsNotInDetails(headDetails) {
-    return this.getElementsMatchingTypeNotInDetails("script", headDetails);
+  getScriptElementsNotInSnapshot(snapshot) {
+    return this.getElementsMatchingTypeNotInSnapshot("script", snapshot);
   }
-  getStylesheetElementsNotInDetails(headDetails) {
-    return this.getElementsMatchingTypeNotInDetails("stylesheet", headDetails);
+  getStylesheetElementsNotInSnapshot(snapshot) {
+    return this.getElementsMatchingTypeNotInSnapshot("stylesheet", snapshot);
   }
-  getElementsMatchingTypeNotInDetails(matchedType, headDetails) {
-    return Object.keys(this.detailsByOuterHTML).filter((outerHTML => !(outerHTML in headDetails.detailsByOuterHTML))).map((outerHTML => this.detailsByOuterHTML[outerHTML])).filter((({type: type}) => type == matchedType)).map((({elements: [element]}) => element));
+  getElementsMatchingTypeNotInSnapshot(matchedType, snapshot) {
+    return Object.keys(this.detailsByOuterHTML).filter((outerHTML => !(outerHTML in snapshot.detailsByOuterHTML))).map((outerHTML => this.detailsByOuterHTML[outerHTML])).filter((({type: type}) => type == matchedType)).map((({elements: [element]}) => element));
   }
-  getProvisionalElements() {
+  get provisionalElements() {
     return Object.keys(this.detailsByOuterHTML).reduce(((result, outerHTML) => {
       const {type: type, tracked: tracked, elements: elements} = this.detailsByOuterHTML[outerHTML];
       if (type == null && !tracked) {
@@ -1221,75 +1367,45 @@ function elementIsMetaElementWithName(element, name) {
   return tagName == "meta" && element.getAttribute("name") == name;
 }
 
-class Snapshot {
-  constructor(headDetails, bodyElement) {
-    this.headDetails = headDetails;
-    this.bodyElement = bodyElement;
+class PageSnapshot extends Snapshot {
+  constructor(element, headSnapshot) {
+    super(element);
+    this.headSnapshot = headSnapshot;
   }
-  static wrap(value) {
-    if (value instanceof this) {
-      return value;
-    } else if (typeof value == "string") {
-      return this.fromHTMLString(value);
-    } else {
-      return this.fromHTMLElement(value);
-    }
+  static fromHTMLString(html = "") {
+    return this.fromDocument(parseHTMLDocument(html));
   }
-  static fromHTMLString(html) {
-    const {documentElement: documentElement} = (new DOMParser).parseFromString(html, "text/html");
-    return this.fromHTMLElement(documentElement);
+  static fromElement(element) {
+    return this.fromDocument(element.ownerDocument);
   }
-  static fromHTMLElement(htmlElement) {
-    const headElement = htmlElement.querySelector("head");
-    const bodyElement = htmlElement.querySelector("body") || document.createElement("body");
-    const headDetails = HeadDetails.fromHeadElement(headElement);
-    return new this(headDetails, bodyElement);
+  static fromDocument({head: head, body: body}) {
+    return new this(body, new HeadSnapshot(head));
   }
   clone() {
-    const {bodyElement: bodyElement} = Snapshot.fromHTMLString(this.bodyElement.outerHTML);
-    return new Snapshot(this.headDetails, bodyElement);
+    return new PageSnapshot(this.element.cloneNode(true), this.headSnapshot);
   }
-  getRootLocation() {
-    const root = this.getSetting("root", "/");
-    return new Location(root);
+  get headElement() {
+    return this.headSnapshot.element;
   }
-  getCacheControlValue() {
+  get rootLocation() {
+    var _a;
+    const root = (_a = this.getSetting("root")) !== null && _a !== void 0 ? _a : "/";
+    return expandURL(root);
+  }
+  get cacheControlValue() {
     return this.getSetting("cache-control");
   }
-  getElementForAnchor(anchor) {
-    try {
-      return this.bodyElement.querySelector(`[id='${anchor}'], a[name='${anchor}']`);
-    } catch (_a) {
-      return null;
-    }
+  get isPreviewable() {
+    return this.cacheControlValue != "no-preview";
   }
-  getPermanentElements() {
-    return [ ...this.bodyElement.querySelectorAll("[id][data-turbo-permanent]") ];
+  get isCacheable() {
+    return this.cacheControlValue != "no-cache";
   }
-  getPermanentElementById(id) {
-    return this.bodyElement.querySelector(`#${id}[data-turbo-permanent]`);
-  }
-  getPermanentElementsPresentInSnapshot(snapshot) {
-    return this.getPermanentElements().filter((({id: id}) => snapshot.getPermanentElementById(id)));
-  }
-  findFirstAutofocusableElement() {
-    return this.bodyElement.querySelector("[autofocus]");
-  }
-  hasAnchor(anchor) {
-    return this.getElementForAnchor(anchor) != null;
-  }
-  isPreviewable() {
-    return this.getCacheControlValue() != "no-preview";
-  }
-  isCacheable() {
-    return this.getCacheControlValue() != "no-cache";
-  }
-  isVisitable() {
+  get isVisitable() {
     return this.getSetting("visit-control") != "reload";
   }
-  getSetting(name, defaultValue) {
-    const value = this.headDetails.getMetaValue(`turbo-${name}`);
-    return value == null ? defaultValue : value;
+  getSetting(name) {
+    return this.headSnapshot.getMetaValue(`turbo-${name}`);
   }
 }
 
@@ -1334,16 +1450,6 @@ class Visit {
     this.scrolled = false;
     this.snapshotCached = false;
     this.state = VisitState.initialized;
-    this.performScroll = () => {
-      if (!this.scrolled) {
-        if (this.action == "restore") {
-          this.scrollToRestoredPosition() || this.scrollToTop();
-        } else {
-          this.scrollToAnchor() || this.scrollToTop();
-        }
-        this.scrolled = true;
-      }
-    };
     this.delegate = delegate;
     this.location = location;
     this.restorationIdentifier = restorationIdentifier || uuid();
@@ -1398,8 +1504,9 @@ class Visit {
     }
   }
   changeHistory() {
+    var _a;
     if (!this.historyChanged) {
-      const actionForHistory = this.location.isEqualTo(this.referrer) ? "replace" : this.action;
+      const actionForHistory = this.location.href === ((_a = this.referrer) === null || _a === void 0 ? void 0 : _a.href) ? "replace" : this.action;
       const method = this.getHistoryMethodForAction(actionForHistory);
       this.history.update(method, this.location, this.restorationIdentifier);
       this.historyChanged = true;
@@ -1442,18 +1549,14 @@ class Visit {
   loadResponse() {
     if (this.response) {
       const {statusCode: statusCode, responseHTML: responseHTML} = this.response;
-      this.render((() => {
+      this.render((async () => {
         this.cacheSnapshot();
         if (isSuccessful(statusCode) && responseHTML != null) {
-          this.view.render({
-            snapshot: Snapshot.fromHTMLString(responseHTML)
-          }, this.performScroll);
+          await this.view.renderPage(PageSnapshot.fromHTMLString(responseHTML));
           this.adapter.visitRendered(this);
           this.complete();
         } else {
-          this.view.render({
-            error: responseHTML
-          }, this.performScroll);
+          await this.view.renderError(PageSnapshot.fromHTMLString(responseHTML));
           this.adapter.visitRendered(this);
           this.fail();
         }
@@ -1462,15 +1565,15 @@ class Visit {
   }
   getCachedSnapshot() {
     const snapshot = this.view.getCachedSnapshotForLocation(this.location) || this.getPreloadedSnapshot();
-    if (snapshot && (!this.location.anchor || snapshot.hasAnchor(this.location.anchor))) {
-      if (this.action == "restore" || snapshot.isPreviewable()) {
+    if (snapshot && (!getAnchor(this.location) || snapshot.hasAnchor(getAnchor(this.location)))) {
+      if (this.action == "restore" || snapshot.isPreviewable) {
         return snapshot;
       }
     }
   }
   getPreloadedSnapshot() {
     if (this.snapshotHTML) {
-      return Snapshot.wrap(this.snapshotHTML);
+      return PageSnapshot.fromHTMLString(this.snapshotHTML);
     }
   }
   hasCachedSnapshot() {
@@ -1480,12 +1583,9 @@ class Visit {
     const snapshot = this.getCachedSnapshot();
     if (snapshot) {
       const isPreview = this.shouldIssueRequest();
-      this.render((() => {
+      this.render((async () => {
         this.cacheSnapshot();
-        this.view.render({
-          snapshot: snapshot,
-          isPreview: isPreview
-        }, this.performScroll);
+        await this.view.renderPage(snapshot);
         this.adapter.visitRendered(this);
         if (!isPreview) {
           this.complete();
@@ -1539,6 +1639,16 @@ class Visit {
   requestFinished() {
     this.finishRequest();
   }
+  performScroll() {
+    if (!this.scrolled) {
+      if (this.action == "restore") {
+        this.scrollToRestoredPosition() || this.scrollToTop();
+      } else {
+        this.scrollToAnchor() || this.scrollToTop();
+      }
+      this.scrolled = true;
+    }
+  }
   scrollToRestoredPosition() {
     const {scrollPosition: scrollPosition} = this.restorationData;
     if (scrollPosition) {
@@ -1547,8 +1657,8 @@ class Visit {
     }
   }
   scrollToAnchor() {
-    if (this.location.anchor != null) {
-      this.view.scrollToAnchor(this.location.anchor);
+    if (getAnchor(this.location) != null) {
+      this.view.scrollToAnchor(getAnchor(this.location));
       return true;
     }
   }
@@ -1586,12 +1696,14 @@ class Visit {
       this.snapshotCached = true;
     }
   }
-  render(callback) {
+  async render(callback) {
     this.cancelRender();
-    this.frame = requestAnimationFrame((() => {
-      delete this.frame;
-      callback.call(this);
+    await new Promise((resolve => {
+      this.frame = requestAnimationFrame((() => resolve()));
     }));
+    callback();
+    delete this.frame;
+    this.performScroll();
   }
   cancelRender() {
     if (this.frame) {
@@ -1766,11 +1878,10 @@ class History {
       if (this.shouldHandlePopState()) {
         const {turbo: turbo} = event.state || {};
         if (turbo) {
-          const location = Location.currentLocation;
-          this.location = location;
+          this.location = new URL(window.location.href);
           const {restorationIdentifier: restorationIdentifier} = turbo;
           this.restorationIdentifier = restorationIdentifier;
-          this.delegate.historyPoppedToLocationWithRestorationIdentifier(location, restorationIdentifier);
+          this.delegate.historyPoppedToLocationWithRestorationIdentifier(this.location, restorationIdentifier);
         }
       }
     };
@@ -1785,7 +1896,7 @@ class History {
       addEventListener("popstate", this.onPopState, false);
       addEventListener("load", this.onPageLoad, false);
       this.started = true;
-      this.replace(Location.currentLocation);
+      this.replace(new URL(window.location.href));
     }
   }
   stop() {
@@ -1807,7 +1918,7 @@ class History {
         restorationIdentifier: restorationIdentifier
       }
     };
-    method.call(history, state, "", location.absoluteURL);
+    method.call(history, state, "", location.href);
     this.location = location;
     this.restorationIdentifier = restorationIdentifier;
   }
@@ -1882,7 +1993,7 @@ class LinkClickObserver {
     }
   }
   getLocationForLink(link) {
-    return new Location(link.getAttribute("href") || "");
+    return expandURL(link.getAttribute("href") || "");
   }
 }
 
@@ -1895,9 +2006,9 @@ class Navigator {
       this.delegate.visitProposedToLocation(location, options);
     }
   }
-  startVisit(location, restorationIdentifier, options = {}) {
+  startVisit(locatable, restorationIdentifier, options = {}) {
     this.stop();
-    this.currentVisit = new Visit(this, Location.wrap(location), restorationIdentifier, Object.assign({
+    this.currentVisit = new Visit(this, expandURL(locatable), restorationIdentifier, Object.assign({
       referrer: this.location
     }, options));
     this.currentVisit.start();
@@ -1948,10 +2059,8 @@ class Navigator {
   async formSubmissionFailedWithResponse(formSubmission, fetchResponse) {
     const responseHTML = await fetchResponse.responseHTML;
     if (responseHTML) {
-      const snapshot = Snapshot.fromHTMLString(responseHTML);
-      this.view.render({
-        snapshot: snapshot
-      }, (() => {}));
+      const snapshot = PageSnapshot.fromHTMLString(responseHTML);
+      await this.view.renderPage(snapshot);
       this.view.clearSnapshotCache();
     }
   }
@@ -2178,63 +2287,18 @@ function isAction(action) {
   return action == "advance" || action == "replace" || action == "restore";
 }
 
-class Renderer {
-  renderView(callback) {
-    this.delegate.viewWillRender(this.newBody);
-    callback();
-    this.delegate.viewRendered(this.newBody);
-  }
-  invalidateView() {
-    this.delegate.viewInvalidated();
-  }
-  createScriptElement(element) {
-    if (element.getAttribute("data-turbo-eval") == "false") {
-      return element;
-    } else {
-      const createdScriptElement = document.createElement("script");
-      createdScriptElement.textContent = element.textContent;
-      createdScriptElement.async = false;
-      copyElementAttributes(createdScriptElement, element);
-      return createdScriptElement;
-    }
-  }
-}
-
-function copyElementAttributes(destinationElement, sourceElement) {
-  for (const {name: name, value: value} of [ ...sourceElement.attributes ]) {
-    destinationElement.setAttribute(name, value);
-  }
-}
-
 class ErrorRenderer extends Renderer {
-  constructor(delegate, html) {
-    super();
-    this.delegate = delegate;
-    this.htmlElement = (() => {
-      const htmlElement = document.createElement("html");
-      htmlElement.innerHTML = html;
-      return htmlElement;
-    })();
-    this.newHead = this.htmlElement.querySelector("head") || document.createElement("head");
-    this.newBody = this.htmlElement.querySelector("body") || document.createElement("body");
-  }
-  static render(delegate, callback, html) {
-    return new this(delegate, html).render(callback);
-  }
-  render(callback) {
-    this.renderView((() => {
-      this.replaceHeadAndBody();
-      this.activateBodyScriptElements();
-      callback();
-    }));
+  async render() {
+    this.replaceHeadAndBody();
+    this.activateScriptElements();
   }
   replaceHeadAndBody() {
     const {documentElement: documentElement, head: head, body: body} = document;
     documentElement.replaceChild(this.newHead, head);
-    documentElement.replaceChild(this.newBody, body);
+    documentElement.replaceChild(this.newElement, body);
   }
-  activateBodyScriptElements() {
-    for (const replaceableElement of this.getScriptElements()) {
+  activateScriptElements() {
+    for (const replaceableElement of this.scriptElements) {
       const parentNode = replaceableElement.parentNode;
       if (parentNode) {
         const element = this.createScriptElement(replaceableElement);
@@ -2242,82 +2306,38 @@ class ErrorRenderer extends Renderer {
       }
     }
   }
-  getScriptElements() {
+  get newHead() {
+    return this.newSnapshot.headSnapshot.element;
+  }
+  get scriptElements() {
     return [ ...document.documentElement.querySelectorAll("script") ];
   }
 }
 
-class SnapshotCache {
-  constructor(size) {
-    this.keys = [];
-    this.snapshots = {};
-    this.size = size;
+class PageRenderer extends Renderer {
+  get shouldRender() {
+    return this.newSnapshot.isVisitable && this.trackedElementsAreIdentical;
   }
-  has(location) {
-    return location.toCacheKey() in this.snapshots;
+  prepareToRender() {
+    this.mergeHead();
   }
-  get(location) {
-    if (this.has(location)) {
-      const snapshot = this.read(location);
-      this.touch(location);
-      return snapshot;
+  async render() {
+    this.replaceBody();
+  }
+  finishRendering() {
+    super.finishRendering();
+    if (this.isPreview) {
+      this.focusFirstAutofocusableElement();
     }
   }
-  put(location, snapshot) {
-    this.write(location, snapshot);
-    this.touch(location);
-    return snapshot;
+  get currentHeadSnapshot() {
+    return this.currentSnapshot.headSnapshot;
   }
-  clear() {
-    this.snapshots = {};
+  get newHeadSnapshot() {
+    return this.newSnapshot.headSnapshot;
   }
-  read(location) {
-    return this.snapshots[location.toCacheKey()];
-  }
-  write(location, snapshot) {
-    this.snapshots[location.toCacheKey()] = snapshot;
-  }
-  touch(location) {
-    const key = location.toCacheKey();
-    const index = this.keys.indexOf(key);
-    if (index > -1) this.keys.splice(index, 1);
-    this.keys.unshift(key);
-    this.trim();
-  }
-  trim() {
-    for (const key of this.keys.splice(this.size)) {
-      delete this.snapshots[key];
-    }
-  }
-}
-
-class SnapshotRenderer extends Renderer {
-  constructor(delegate, currentSnapshot, newSnapshot, isPreview) {
-    super();
-    this.delegate = delegate;
-    this.currentSnapshot = currentSnapshot;
-    this.currentHeadDetails = currentSnapshot.headDetails;
-    this.newSnapshot = newSnapshot;
-    this.newHeadDetails = newSnapshot.headDetails;
-    this.newBody = newSnapshot.bodyElement;
-    this.isPreview = isPreview;
-  }
-  static render(delegate, callback, currentSnapshot, newSnapshot, isPreview) {
-    return new this(delegate, currentSnapshot, newSnapshot, isPreview).render(callback);
-  }
-  render(callback) {
-    if (this.shouldRender()) {
-      this.mergeHead();
-      this.renderView((() => {
-        this.replaceBody();
-        if (!this.isPreview) {
-          this.focusFirstAutofocusableElement();
-        }
-        callback();
-      }));
-    } else {
-      this.invalidateView();
-    }
+  get newElement() {
+    return this.newSnapshot.element;
   }
   mergeHead() {
     this.copyNewHeadStylesheetElements();
@@ -2331,34 +2351,31 @@ class SnapshotRenderer extends Renderer {
     this.assignNewBody();
     this.replacePlaceholderElementsWithClonedPermanentElements(placeholders);
   }
-  shouldRender() {
-    return this.newSnapshot.isVisitable() && this.trackedElementsAreIdentical();
-  }
-  trackedElementsAreIdentical() {
-    return this.currentHeadDetails.getTrackedElementSignature() == this.newHeadDetails.getTrackedElementSignature();
+  get trackedElementsAreIdentical() {
+    return this.currentHeadSnapshot.trackedElementSignature == this.newHeadSnapshot.trackedElementSignature;
   }
   copyNewHeadStylesheetElements() {
-    for (const element of this.getNewHeadStylesheetElements()) {
+    for (const element of this.newHeadStylesheetElements) {
       document.head.appendChild(element);
     }
   }
   copyNewHeadScriptElements() {
-    for (const element of this.getNewHeadScriptElements()) {
+    for (const element of this.newHeadScriptElements) {
       document.head.appendChild(this.createScriptElement(element));
     }
   }
   removeCurrentHeadProvisionalElements() {
-    for (const element of this.getCurrentHeadProvisionalElements()) {
+    for (const element of this.currentHeadProvisionalElements) {
       document.head.removeChild(element);
     }
   }
   copyNewHeadProvisionalElements() {
-    for (const element of this.getNewHeadProvisionalElements()) {
+    for (const element of this.newHeadProvisionalElements) {
       document.head.appendChild(element);
     }
   }
   relocateCurrentBodyPermanentElements() {
-    return this.getCurrentBodyPermanentElements().reduce(((placeholders, permanentElement) => {
+    return this.currentBodyPermanentElements.reduce(((placeholders, permanentElement) => {
       const newElement = this.newSnapshot.getPermanentElementById(permanentElement.id);
       if (newElement) {
         const placeholder = createPlaceholderForPermanentElement(permanentElement);
@@ -2377,45 +2394,45 @@ class SnapshotRenderer extends Renderer {
     }
   }
   activateNewBody() {
-    document.adoptNode(this.newBody);
+    document.adoptNode(this.newElement);
     this.activateNewBodyScriptElements();
   }
   activateNewBodyScriptElements() {
-    for (const inertScriptElement of this.getNewBodyScriptElements()) {
+    for (const inertScriptElement of this.newBodyScriptElements) {
       const activatedScriptElement = this.createScriptElement(inertScriptElement);
       replaceElementWithElement(inertScriptElement, activatedScriptElement);
     }
   }
   assignNewBody() {
-    if (document.body) {
-      replaceElementWithElement(document.body, this.newBody);
+    if (document.body && this.newElement instanceof HTMLBodyElement) {
+      replaceElementWithElement(document.body, this.newElement);
     } else {
-      document.documentElement.appendChild(this.newBody);
+      document.documentElement.appendChild(this.newElement);
     }
   }
   focusFirstAutofocusableElement() {
-    const element = this.newSnapshot.findFirstAutofocusableElement();
+    const element = this.newSnapshot.firstAutofocusableElement;
     if (elementIsFocusable(element)) {
       element.focus();
     }
   }
-  getNewHeadStylesheetElements() {
-    return this.newHeadDetails.getStylesheetElementsNotInDetails(this.currentHeadDetails);
+  get newHeadStylesheetElements() {
+    return this.newHeadSnapshot.getStylesheetElementsNotInSnapshot(this.currentHeadSnapshot);
   }
-  getNewHeadScriptElements() {
-    return this.newHeadDetails.getScriptElementsNotInDetails(this.currentHeadDetails);
+  get newHeadScriptElements() {
+    return this.newHeadSnapshot.getScriptElementsNotInSnapshot(this.currentHeadSnapshot);
   }
-  getCurrentHeadProvisionalElements() {
-    return this.currentHeadDetails.getProvisionalElements();
+  get currentHeadProvisionalElements() {
+    return this.currentHeadSnapshot.provisionalElements;
   }
-  getNewHeadProvisionalElements() {
-    return this.newHeadDetails.getProvisionalElements();
+  get newHeadProvisionalElements() {
+    return this.newHeadSnapshot.provisionalElements;
   }
-  getCurrentBodyPermanentElements() {
+  get currentBodyPermanentElements() {
     return this.currentSnapshot.getPermanentElementsPresentInSnapshot(this.newSnapshot);
   }
-  getNewBodyScriptElements() {
-    return [ ...this.newBody.querySelectorAll("script") ];
+  get newBodyScriptElements() {
+    return [ ...this.newElement.querySelectorAll("script") ];
   }
 }
 
@@ -2440,75 +2457,83 @@ function elementIsFocusable(element) {
   return element && typeof element.focus == "function";
 }
 
-class View {
-  constructor(delegate) {
-    this.htmlElement = document.documentElement;
+class SnapshotCache {
+  constructor(size) {
+    this.keys = [];
+    this.snapshots = {};
+    this.size = size;
+  }
+  has(location) {
+    return toCacheKey(location) in this.snapshots;
+  }
+  get(location) {
+    if (this.has(location)) {
+      const snapshot = this.read(location);
+      this.touch(location);
+      return snapshot;
+    }
+  }
+  put(location, snapshot) {
+    this.write(location, snapshot);
+    this.touch(location);
+    return snapshot;
+  }
+  clear() {
+    this.snapshots = {};
+  }
+  read(location) {
+    return this.snapshots[toCacheKey(location)];
+  }
+  write(location, snapshot) {
+    this.snapshots[toCacheKey(location)] = snapshot;
+  }
+  touch(location) {
+    const key = toCacheKey(location);
+    const index = this.keys.indexOf(key);
+    if (index > -1) this.keys.splice(index, 1);
+    this.keys.unshift(key);
+    this.trim();
+  }
+  trim() {
+    for (const key of this.keys.splice(this.size)) {
+      delete this.snapshots[key];
+    }
+  }
+}
+
+class PageView extends View {
+  constructor() {
+    super(...arguments);
     this.snapshotCache = new SnapshotCache(10);
-    this.delegate = delegate;
+    this.lastRenderedLocation = new URL(location.href);
   }
-  getRootLocation() {
-    return this.getSnapshot().getRootLocation();
+  renderPage(snapshot, isPreview = false) {
+    const renderer = new PageRenderer(this.snapshot, snapshot, isPreview);
+    return this.render(renderer);
   }
-  getElementForAnchor(anchor) {
-    return this.getSnapshot().getElementForAnchor(anchor);
-  }
-  getSnapshot() {
-    return Snapshot.fromHTMLElement(this.htmlElement);
+  renderError(snapshot) {
+    const renderer = new ErrorRenderer(this.snapshot, snapshot, false);
+    this.render(renderer);
   }
   clearSnapshotCache() {
     this.snapshotCache.clear();
   }
-  shouldCacheSnapshot() {
-    return this.getSnapshot().isCacheable();
-  }
-  cacheSnapshot() {
-    if (this.shouldCacheSnapshot()) {
+  async cacheSnapshot() {
+    if (this.shouldCacheSnapshot) {
       this.delegate.viewWillCacheSnapshot();
-      const snapshot = this.getSnapshot();
-      const location = this.lastRenderedLocation || Location.currentLocation;
-      setTimeout(() => this.snapshotCache.put(location, snapshot.clone()));
+      const {snapshot: snapshot, lastRenderedLocation: location} = this;
+      await nextMicrotask();
+      this.snapshotCache.put(location, snapshot.clone());
     }
   }
   getCachedSnapshotForLocation(location) {
     return this.snapshotCache.get(location);
   }
-  render({snapshot: snapshot, error: error, isPreview: isPreview}, callback) {
-    this.markAsPreview(isPreview);
-    if (snapshot) {
-      this.renderSnapshot(snapshot, isPreview, callback);
-    } else {
-      this.renderError(error, callback);
-    }
+  get snapshot() {
+    return PageSnapshot.fromElement(this.element);
   }
-  scrollToAnchor(anchor) {
-    const element = this.getElementForAnchor(anchor);
-    if (element) {
-      this.scrollToElement(element);
-    } else {
-      this.scrollToPosition({
-        x: 0,
-        y: 0
-      });
-    }
-  }
-  scrollToElement(element) {
-    element.scrollIntoView();
-  }
-  scrollToPosition({x: x, y: y}) {
-    window.scrollTo(x, y);
-  }
-  markAsPreview(isPreview) {
-    if (isPreview) {
-      this.htmlElement.setAttribute("data-turbo-preview", "");
-    } else {
-      this.htmlElement.removeAttribute("data-turbo-preview");
-    }
-  }
-  renderSnapshot(snapshot, isPreview, callback) {
-    SnapshotRenderer.render(this.delegate, callback, this.getSnapshot(), snapshot, isPreview || false);
-  }
-  renderError(error, callback) {
-    ErrorRenderer.render(this.delegate, callback, error || "");
+  get shouldCacheSnapshot() {
+    return this.snapshot.isCacheable;
   }
 }
 
@@ -2516,7 +2541,7 @@ class Session {
   constructor() {
     this.navigator = new Navigator(this);
     this.history = new History(this);
-    this.view = new View(this);
+    this.view = new PageView(this, document.documentElement);
     this.adapter = new BrowserAdapter(this);
     this.pageObserver = new PageObserver(this);
     this.linkClickObserver = new LinkClickObserver(this);
@@ -2560,7 +2585,7 @@ class Session {
     this.adapter = adapter;
   }
   visit(location, options = {}) {
-    this.navigator.proposeVisit(Location.wrap(location), options);
+    this.navigator.proposeVisit(expandURL(location), options);
   }
   connectStreamSource(source) {
     this.streamObserver.connectStreamSource(source);
@@ -2603,7 +2628,7 @@ class Session {
   }
   followedLinkToLocation(link, location) {
     const action = this.getActionForLink(link);
-    this.visit(location, {
+    this.visit(location.href, {
       action: action
     });
   }
@@ -2611,9 +2636,11 @@ class Session {
     return this.applicationAllowsVisitingLocation(location);
   }
   visitProposedToLocation(location, options) {
+    extendURLWithDeprecatedProperties(location);
     this.adapter.visitProposedToLocation(location, options);
   }
   visitStarted(visit) {
+    extendURLWithDeprecatedProperties(visit.location);
     this.notifyApplicationAfterVisitingLocation(visit.location);
   }
   visitCompleted(visit) {
@@ -2638,18 +2665,18 @@ class Session {
   receivedMessageFromStream(message) {
     this.renderStreamMessage(message);
   }
-  viewWillRender(newBody) {
-    this.notifyApplicationBeforeRender(newBody);
+  viewWillCacheSnapshot() {
+    this.notifyApplicationBeforeCachingSnapshot();
   }
-  viewRendered() {
+  viewWillRenderSnapshot({element: element}, isPreview) {
+    this.notifyApplicationBeforeRender(element);
+  }
+  viewRenderedSnapshot(snapshot, isPreview) {
     this.view.lastRenderedLocation = this.history.location;
     this.notifyApplicationAfterRender();
   }
   viewInvalidated() {
     this.adapter.pageInvalidated();
-  }
-  viewWillCacheSnapshot() {
-    this.notifyApplicationBeforeCachingSnapshot();
   }
   applicationAllowsFollowingLinkToLocation(link, location) {
     const event = this.notifyApplicationAfterClickingLinkToLocation(link, location);
@@ -2663,7 +2690,7 @@ class Session {
     return dispatch("turbo:click", {
       target: link,
       detail: {
-        url: location.absoluteURL
+        url: location.href
       },
       cancelable: true
     });
@@ -2671,7 +2698,7 @@ class Session {
   notifyApplicationBeforeVisitingLocation(location) {
     return dispatch("turbo:before-visit", {
       detail: {
-        url: location.absoluteURL
+        url: location.href
       },
       cancelable: true
     });
@@ -2679,7 +2706,7 @@ class Session {
   notifyApplicationAfterVisitingLocation(location) {
     return dispatch("turbo:visit", {
       detail: {
-        url: location.absoluteURL
+        url: location.href
       }
     });
   }
@@ -2699,7 +2726,7 @@ class Session {
   notifyApplicationAfterPageLoad(timing = {}) {
     return dispatch("turbo:load", {
       detail: {
-        url: this.location.absoluteURL,
+        url: this.location.href,
         timing: timing
       }
     });
@@ -2717,9 +2744,24 @@ class Session {
     }
   }
   locationIsVisitable(location) {
-    return location.isPrefixedBy(this.view.getRootLocation()) && location.isHTML();
+    return isPrefixedBy(location, this.snapshot.rootLocation) && isHTML(location);
+  }
+  get snapshot() {
+    return this.view.snapshot;
   }
 }
+
+function extendURLWithDeprecatedProperties(url) {
+  Object.defineProperties(url, deprecatedLocationPropertyDescriptors);
+}
+
+const deprecatedLocationPropertyDescriptors = {
+  absoluteURL: {
+    get() {
+      return this.toString();
+    }
+  }
+};
 
 const session = new Session;
 
