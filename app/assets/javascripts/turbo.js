@@ -247,6 +247,10 @@ function nextAnimationFrame() {
   return new Promise((resolve => requestAnimationFrame((() => resolve()))));
 }
 
+function nextEventLoopTick() {
+  return new Promise((resolve => setTimeout((() => resolve()), 0)));
+}
+
 function nextMicrotask() {
   return Promise.resolve();
 }
@@ -315,12 +319,16 @@ function fetchMethodFromString(method) {
 }
 
 class FetchRequest {
-  constructor(delegate, method, location, body) {
+  constructor(delegate, method, location, body = new URLSearchParams) {
     this.abortController = new AbortController;
     this.delegate = delegate;
     this.method = method;
-    this.body = body;
-    this.url = mergeFormDataEntries(location, this.entries);
+    if (this.isIdempotent) {
+      this.url = mergeFormDataEntries(location, [ ...body.entries() ]);
+    } else {
+      this.body = body;
+      this.url = location;
+    }
   }
   get location() {
     return this.url;
@@ -375,7 +383,7 @@ class FetchRequest {
       credentials: "same-origin",
       headers: this.headers,
       redirect: "follow",
-      body: this.isIdempotent ? undefined : this.body,
+      body: this.body,
       signal: this.abortSignal
     };
   }
@@ -383,25 +391,32 @@ class FetchRequest {
     return this.method == FetchMethod.get;
   }
   get headers() {
-    return Object.assign({
-      Accept: "text/html, application/xhtml+xml"
-    }, this.additionalHeaders);
-  }
-  get additionalHeaders() {
-    if (typeof this.delegate.additionalHeadersForRequest == "function") {
-      return this.delegate.additionalHeadersForRequest(this);
-    } else {
-      return {};
+    const headers = Object.assign({}, this.defaultHeaders);
+    if (typeof this.delegate.prepareHeadersForRequest == "function") {
+      this.delegate.prepareHeadersForRequest(headers, this);
     }
+    return headers;
   }
   get abortSignal() {
     return this.abortController.signal;
   }
+  get defaultHeaders() {
+    return {
+      Accept: "text/html, application/xhtml+xml"
+    };
+  }
 }
 
 function mergeFormDataEntries(url, entries) {
+  const currentSearchParams = new URLSearchParams(url.search);
   for (const [name, value] of entries) {
-    url.searchParams.append(name, value.toString());
+    if (value instanceof File) continue;
+    if (currentSearchParams.has(name)) {
+      currentSearchParams.delete(name);
+      url.searchParams.set(name, value);
+    } else {
+      url.searchParams.append(name, value);
+    }
   }
   return url;
 }
@@ -433,6 +448,41 @@ class AppearanceObserver {
   }
 }
 
+class StreamMessage {
+  constructor(html) {
+    this.templateElement = document.createElement("template");
+    this.templateElement.innerHTML = html;
+  }
+  static wrap(message) {
+    if (typeof message == "string") {
+      return new this(message);
+    } else {
+      return message;
+    }
+  }
+  get fragment() {
+    const fragment = document.createDocumentFragment();
+    for (const element of this.foreignElements) {
+      fragment.appendChild(document.importNode(element, true));
+    }
+    return fragment;
+  }
+  get foreignElements() {
+    return this.templateChildren.reduce(((streamElements, child) => {
+      if (child.tagName.toLowerCase() == "turbo-stream") {
+        return [ ...streamElements, child ];
+      } else {
+        return streamElements;
+      }
+    }), []);
+  }
+  get templateChildren() {
+    return Array.from(this.templateElement.content.children);
+  }
+}
+
+StreamMessage.contentType = "text/vnd.turbo-stream.html";
+
 var FormSubmissionState;
 
 (function(FormSubmissionState) {
@@ -444,14 +494,35 @@ var FormSubmissionState;
   FormSubmissionState[FormSubmissionState["stopped"] = 5] = "stopped";
 })(FormSubmissionState || (FormSubmissionState = {}));
 
+var FormEnctype;
+
+(function(FormEnctype) {
+  FormEnctype["urlEncoded"] = "application/x-www-form-urlencoded";
+  FormEnctype["multipart"] = "multipart/form-data";
+  FormEnctype["plain"] = "text/plain";
+})(FormEnctype || (FormEnctype = {}));
+
+function formEnctypeFromString(encoding) {
+  switch (encoding.toLowerCase()) {
+   case FormEnctype.multipart:
+    return FormEnctype.multipart;
+
+   case FormEnctype.plain:
+    return FormEnctype.plain;
+
+   default:
+    return FormEnctype.urlEncoded;
+  }
+}
+
 class FormSubmission {
   constructor(delegate, formElement, submitter, mustRedirect = false) {
     this.state = FormSubmissionState.initialized;
     this.delegate = delegate;
     this.formElement = formElement;
-    this.formData = buildFormData(formElement, submitter);
     this.submitter = submitter;
-    this.fetchRequest = new FetchRequest(this, this.method, this.location, this.formData);
+    this.formData = buildFormData(formElement, submitter);
+    this.fetchRequest = new FetchRequest(this, this.method, this.location, this.body);
     this.mustRedirect = mustRedirect;
   }
   get method() {
@@ -465,6 +536,20 @@ class FormSubmission {
   }
   get location() {
     return expandURL(this.action);
+  }
+  get body() {
+    if (this.enctype == FormEnctype.urlEncoded || this.method == FetchMethod.get) {
+      return new URLSearchParams(this.stringFormData);
+    } else {
+      return this.formData;
+    }
+  }
+  get enctype() {
+    var _a;
+    return formEnctypeFromString(((_a = this.submitter) === null || _a === void 0 ? void 0 : _a.getAttribute("formenctype")) || this.formElement.enctype);
+  }
+  get stringFormData() {
+    return [ ...this.formData ].reduce(((entries, [name, value]) => entries.concat(typeof value == "string" ? [ [ name, value ] ] : [])), []);
   }
   async start() {
     const {initialized: initialized, requesting: requesting} = FormSubmissionState;
@@ -481,15 +566,14 @@ class FormSubmission {
       return true;
     }
   }
-  additionalHeadersForRequest(request) {
-    const headers = {};
-    if (this.method != FetchMethod.get) {
+  prepareHeadersForRequest(headers, request) {
+    if (!request.isIdempotent) {
       const token = getCookieValue(getMetaContent("csrf-param")) || getMetaContent("csrf-token");
       if (token) {
         headers["X-CSRF-Token"] = token;
       }
+      headers["Accept"] = [ StreamMessage.contentType, headers["Accept"] ].join(", ");
     }
-    return headers;
   }
   requestStarted(request) {
     this.state = FormSubmissionState.waiting;
@@ -786,11 +870,29 @@ class Renderer {
       return createdScriptElement;
     }
   }
+  preservingPermanentElements(callback) {
+    const placeholders = relocatePermanentElements(this.currentSnapshot, this.newSnapshot);
+    callback();
+    replacePlaceholderElementsWithClonedPermanentElements(placeholders);
+  }
+  focusFirstAutofocusableElement() {
+    const element = this.newSnapshot.firstAutofocusableElement;
+    if (elementIsFocusable(element)) {
+      element.focus();
+    }
+  }
   get currentElement() {
     return this.currentSnapshot.element;
   }
   get newElement() {
     return this.newSnapshot.element;
+  }
+}
+
+function replaceElementWithElement(fromElement, toElement) {
+  const parentElement = fromElement.parentElement;
+  if (parentElement) {
+    return parentElement.replaceChild(toElement, fromElement);
   }
 }
 
@@ -800,13 +902,50 @@ function copyElementAttributes(destinationElement, sourceElement) {
   }
 }
 
+function createPlaceholderForPermanentElement(permanentElement) {
+  const element = document.createElement("meta");
+  element.setAttribute("name", "turbo-permanent-placeholder");
+  element.setAttribute("content", permanentElement.id);
+  return {
+    element: element,
+    permanentElement: permanentElement
+  };
+}
+
+function replacePlaceholderElementsWithClonedPermanentElements(placeholders) {
+  for (const {element: element, permanentElement: permanentElement} of placeholders) {
+    const clonedElement = permanentElement.cloneNode(true);
+    replaceElementWithElement(element, clonedElement);
+  }
+}
+
+function relocatePermanentElements(currentSnapshot, newSnapshot) {
+  return currentSnapshot.getPermanentElementsPresentInSnapshot(newSnapshot).reduce(((placeholders, permanentElement) => {
+    const newElement = newSnapshot.getPermanentElementById(permanentElement.id);
+    if (newElement) {
+      const placeholder = createPlaceholderForPermanentElement(permanentElement);
+      replaceElementWithElement(permanentElement, placeholder.element);
+      replaceElementWithElement(newElement, permanentElement);
+      return [ ...placeholders, placeholder ];
+    } else {
+      return placeholders;
+    }
+  }), []);
+}
+
+function elementIsFocusable(element) {
+  return element && typeof element.focus == "function";
+}
+
 class FrameRenderer extends Renderer {
   get shouldRender() {
     return true;
   }
   async render() {
     await nextAnimationFrame();
-    this.loadFrameElement();
+    this.preservingPermanentElements((() => {
+      this.loadFrameElement();
+    }));
     this.scrollFrameIntoView();
     await nextAnimationFrame();
     this.focusFirstAutofocusableElement();
@@ -835,21 +974,6 @@ class FrameRenderer extends Renderer {
       }
     }
     return false;
-  }
-  focusFirstAutofocusableElement() {
-    const element = this.firstAutofocusableElement;
-    if (element) {
-      element.focus();
-      return true;
-    }
-    return false;
-  }
-  get id() {
-    return this.currentElement.id;
-  }
-  get firstAutofocusableElement() {
-    const element = this.currentElement.querySelector("[autofocus]");
-    return element instanceof HTMLElement ? element : null;
   }
 }
 
@@ -944,10 +1068,8 @@ class FrameController {
       this.formSubmission.start();
     }
   }
-  additionalHeadersForRequest(request) {
-    return {
-      "Turbo-Frame": this.id
-    };
+  prepareHeadersForRequest(headers, request) {
+    headers["Turbo-Frame"] = this.id;
   }
   requestStarted(request) {
     this.element.setAttribute("busy", "");
@@ -999,7 +1121,7 @@ class FrameController {
   }
   findFrameElement(element) {
     var _a;
-    const id = element.getAttribute("data-turbo-frame");
+    const id = element.getAttribute("data-turbo-frame") || this.element.getAttribute("target");
     return (_a = getFrameElementById(id)) !== null && _a !== void 0 ? _a : this.element;
   }
   async extractForeignFrameElement(container) {
@@ -2016,7 +2138,11 @@ class Navigator {
   submitForm(form, submitter) {
     this.stop();
     this.formSubmission = new FormSubmission(this, form, submitter, true);
-    this.formSubmission.start();
+    if (this.formSubmission.fetchRequest.isIdempotent) {
+      this.proposeVisit(this.formSubmission.fetchRequest.url);
+    } else {
+      this.formSubmission.start();
+    }
   }
   stop() {
     if (this.formSubmission) {
@@ -2170,51 +2296,10 @@ class ScrollObserver {
   }
 }
 
-class StreamMessage {
-  constructor(html) {
-    this.templateElement = document.createElement("template");
-    this.templateElement.innerHTML = html;
-  }
-  static wrap(message) {
-    if (typeof message == "string") {
-      return new this(message);
-    } else {
-      return message;
-    }
-  }
-  get fragment() {
-    const fragment = document.createDocumentFragment();
-    for (const element of this.foreignElements) {
-      fragment.appendChild(document.importNode(element, true));
-    }
-    return fragment;
-  }
-  get foreignElements() {
-    return this.templateChildren.reduce(((streamElements, child) => {
-      if (child.tagName.toLowerCase() == "turbo-stream") {
-        return [ ...streamElements, child ];
-      } else {
-        return streamElements;
-      }
-    }), []);
-  }
-  get templateChildren() {
-    return Array.from(this.templateElement.content.children);
-  }
-}
-
 class StreamObserver {
   constructor(delegate) {
     this.sources = new Set;
     this.started = false;
-    this.prepareFetchRequest = event => {
-      var _a;
-      const fetchOptions = (_a = event.detail) === null || _a === void 0 ? void 0 : _a.fetchOptions;
-      if (fetchOptions) {
-        const {headers: headers} = fetchOptions;
-        headers.Accept = [ "text/vnd.turbo-stream.html", headers.Accept ].join(", ");
-      }
-    };
     this.inspectFetchResponse = event => {
       const response = fetchResponseFromEvent(event);
       if (response && fetchResponseIsStream(response)) {
@@ -2232,14 +2317,12 @@ class StreamObserver {
   start() {
     if (!this.started) {
       this.started = true;
-      addEventListener("turbo:before-fetch-request", this.prepareFetchRequest, true);
       addEventListener("turbo:before-fetch-response", this.inspectFetchResponse, false);
     }
   }
   stop() {
     if (this.started) {
       this.started = false;
-      removeEventListener("turbo:before-fetch-request", this.prepareFetchRequest, true);
       removeEventListener("turbo:before-fetch-response", this.inspectFetchResponse, false);
     }
   }
@@ -2280,7 +2363,7 @@ function fetchResponseFromEvent(event) {
 function fetchResponseIsStream(response) {
   var _a;
   const contentType = (_a = response.contentType) !== null && _a !== void 0 ? _a : "";
-  return /^text\/vnd\.turbo-stream\.html\b/.test(contentType);
+  return contentType.startsWith(StreamMessage.contentType);
 }
 
 function isAction(action) {
@@ -2346,10 +2429,10 @@ class PageRenderer extends Renderer {
     this.copyNewHeadProvisionalElements();
   }
   replaceBody() {
-    const placeholders = this.relocateCurrentBodyPermanentElements();
-    this.activateNewBody();
-    this.assignNewBody();
-    this.replacePlaceholderElementsWithClonedPermanentElements(placeholders);
+    this.preservingPermanentElements((() => {
+      this.activateNewBody();
+      this.assignNewBody();
+    }));
   }
   get trackedElementsAreIdentical() {
     return this.currentHeadSnapshot.trackedElementSignature == this.newHeadSnapshot.trackedElementSignature;
@@ -2374,25 +2457,6 @@ class PageRenderer extends Renderer {
       document.head.appendChild(element);
     }
   }
-  relocateCurrentBodyPermanentElements() {
-    return this.currentBodyPermanentElements.reduce(((placeholders, permanentElement) => {
-      const newElement = this.newSnapshot.getPermanentElementById(permanentElement.id);
-      if (newElement) {
-        const placeholder = createPlaceholderForPermanentElement(permanentElement);
-        replaceElementWithElement(permanentElement, placeholder.element);
-        replaceElementWithElement(newElement, permanentElement);
-        return [ ...placeholders, placeholder ];
-      } else {
-        return placeholders;
-      }
-    }), []);
-  }
-  replacePlaceholderElementsWithClonedPermanentElements(placeholders) {
-    for (const {element: element, permanentElement: permanentElement} of placeholders) {
-      const clonedElement = permanentElement.cloneNode(true);
-      replaceElementWithElement(element, clonedElement);
-    }
-  }
   activateNewBody() {
     document.adoptNode(this.newElement);
     this.activateNewBodyScriptElements();
@@ -2410,12 +2474,6 @@ class PageRenderer extends Renderer {
       document.documentElement.appendChild(this.newElement);
     }
   }
-  focusFirstAutofocusableElement() {
-    const element = this.newSnapshot.firstAutofocusableElement;
-    if (elementIsFocusable(element)) {
-      element.focus();
-    }
-  }
   get newHeadStylesheetElements() {
     return this.newHeadSnapshot.getStylesheetElementsNotInSnapshot(this.currentHeadSnapshot);
   }
@@ -2428,33 +2486,9 @@ class PageRenderer extends Renderer {
   get newHeadProvisionalElements() {
     return this.newHeadSnapshot.provisionalElements;
   }
-  get currentBodyPermanentElements() {
-    return this.currentSnapshot.getPermanentElementsPresentInSnapshot(this.newSnapshot);
-  }
   get newBodyScriptElements() {
     return [ ...this.newElement.querySelectorAll("script") ];
   }
-}
-
-function createPlaceholderForPermanentElement(permanentElement) {
-  const element = document.createElement("meta");
-  element.setAttribute("name", "turbo-permanent-placeholder");
-  element.setAttribute("content", permanentElement.id);
-  return {
-    element: element,
-    permanentElement: permanentElement
-  };
-}
-
-function replaceElementWithElement(fromElement, toElement) {
-  const parentElement = fromElement.parentElement;
-  if (parentElement) {
-    return parentElement.replaceChild(toElement, fromElement);
-  }
-}
-
-function elementIsFocusable(element) {
-  return element && typeof element.focus == "function";
 }
 
 class SnapshotCache {
@@ -2522,7 +2556,7 @@ class PageView extends View {
     if (this.shouldCacheSnapshot) {
       this.delegate.viewWillCacheSnapshot();
       const {snapshot: snapshot, lastRenderedLocation: location} = this;
-      await nextMicrotask();
+      await nextEventLoopTick();
       this.snapshotCache.put(location, snapshot.clone());
     }
   }
